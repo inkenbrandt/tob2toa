@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tob2toa"
+version = "0.1.0"
+description = "Converts binary Campbell Scientific TOB files to TOA format"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["eddy covariance", "micrometeorology", "turbulence", "spectra", "flux"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "polars>=0.19",
+    "pandas>=1.5",
+    "pyarrow",
+    "KDEpy>=1.1",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.0",
+    "mkdocstrings[python]>=0.24",
+]
+
+[project.urls]
+Repository = "https://github.com/paultgriffiths/tob2toa"
+Issues = "https://github.com/paultgriffiths/tob2toa/issues"
+
+[tool.setuptools]
+packages = ["tob2toa"]
+
+[tool.setuptools.package-dir]
+tob2toa = "src/tob2toa"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--tb=short -q"
+
+[tool.coverage.run]
+source = ["src/tob2toa"]
