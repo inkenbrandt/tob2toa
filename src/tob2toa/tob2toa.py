@@ -356,18 +356,15 @@ def tob3_to_dataframe(input_path):
         return pd.DataFrame(columns=["TIMESTAMP", "RECORD"] + hdr["field_names"])
 
     time_res = hdr["time_resolution"]
-    field_names = hdr["field_names"]
-    rows = []
-    for rec_sec, rec_subsec, recno, values in records:
-        rows.append(
-            {
-                "TIMESTAMP": _format_timestamp(rec_sec, rec_subsec, time_res),
-                "RECORD": recno,
-                **dict(zip(field_names, values)),
-            }
-        )
+    columns = ["TIMESTAMP", "RECORD", *hdr["field_names"]]
 
-    return pd.DataFrame(rows)
+    # Build row tuples directly to avoid per-row dict+zip overhead.
+    rows = [
+        (_format_timestamp(rec_sec, rec_subsec, time_res), recno, *values)
+        for rec_sec, rec_subsec, recno, values in records
+    ]
+
+    return pd.DataFrame.from_records(rows, columns=columns)
 
 
 def convert_tob3_to_toa5(input_path, output_path=None, verbose=True):
