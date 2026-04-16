@@ -10,6 +10,7 @@ from tob2toa.tob2toa import (
     _get_interval_seconds,
     parse_header,
     convert_tob3_to_toa5,
+    tob3_to_dataframe,
 )
 
 def test_type_size():
@@ -153,3 +154,38 @@ def test_convert_tob3_to_toa5(tmp_path):
     assert '"TIMESTAMP","RECORD","Temp","Press"' in lines[1]
     assert '"2023-01-01 00:00:00",1,20,1013' in lines[4]
     assert '"2023-01-01 00:00:05",6,25,1018' in lines[9]
+
+
+def test_tob3_to_dataframe(tmp_path):
+    header_text = (
+        '"TOB3","Station1","CR1000X","12345","OS_1.0","Prog1","1234","2023-01-01 00:00:00"\r\n'
+        '"MainTable","1 SEC",64,10000,12345,"Sec100Usec","","",""\r\n'
+        '"Temp","Press"\r\n'
+        '"degC","hPa"\r\n'
+        '"Smp","Smp"\r\n'
+        '"IEEE4","IEEE4"\r\n'
+    ).encode("ascii")
+
+    from datetime import datetime
+    delta = datetime(2023, 1, 1) - datetime(1990, 1, 1)
+    base_sec = int(delta.total_seconds())
+
+    frame_hdr = struct.pack("<III", base_sec, 0, 1)
+    data = b""
+    for i in range(6):
+        data += struct.pack(">ff", 20.0 + i, 1013.0 + i)
+    footer = struct.pack("<HH", 0, 12345)
+    frame = frame_hdr + data + footer
+
+    input_file = tmp_path / "test_df.dat"
+    input_file.write_bytes(header_text + frame)
+
+    df = tob3_to_dataframe(str(input_file))
+
+    assert list(df.columns) == ["TIMESTAMP", "RECORD", "Temp", "Press"]
+    assert len(df) == 6
+    assert df.iloc[0]["TIMESTAMP"] == "2023-01-01 00:00:00"
+    assert df.iloc[0]["RECORD"] == 1
+    assert df.iloc[0]["Temp"] == pytest.approx(20.0)
+    assert df.iloc[-1]["TIMESTAMP"] == "2023-01-01 00:00:05"
+    assert df.iloc[-1]["Press"] == pytest.approx(1018.0)
