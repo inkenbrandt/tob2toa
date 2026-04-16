@@ -324,13 +324,6 @@ def _extract_valid_records(file_data, hdr):
                 else:
                     rec_sec = sec
                     rec_subsec = subsec
-            elif interval_sec is not None:
-                total_100_usec = sec * 10_000 + subsec + int(rec_idx * interval_sec * 10_000)
-                rec_sec = total_100_usec // 10_000
-                rec_subsec = total_100_usec % 10_000
-            else:
-                rec_sec = sec
-                rec_subsec = subsec
 
             values = []
             for i, dtype in enumerate(field_types):
