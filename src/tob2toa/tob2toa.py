@@ -341,9 +341,7 @@ def convert_tob3_to_toa5(input_path, output_path=None, verbose=True):
                 # Advance by interval for subsequent records in multi-record frames
                 if interval_sec is not None:
                     total_usec = (
-                        sec * 10_000
-                        + subsec
-                        + int(rec_idx * interval_sec * 10_000)
+                        sec * 10_000 + subsec + int(rec_idx * interval_sec * 10_000)
                     )
                     rec_sec = total_usec // 10_000
                     rec_subsec = total_usec % 10_000
@@ -447,6 +445,53 @@ def find_tob3_files(path):
             pass
 
     return sorted(tob3_files)
+
+
+def parse_toa5_header(file_path):
+    """Parse the header of a TOA5 file to extract metadata.
+
+    Returns:
+        dict with keys: station_name, logger_model, serial_no, os_version,
+        program_name, program_sig, table_name, field_names, field_units,
+        field_proc
+    """
+    with open(file_path, "r") as f:
+        lines = [next(f).strip() for _ in range(4)]
+
+    # Line 0: environment info
+    env_fields = next(csv.reader(io.StringIO(lines[0])))
+    if env_fields[0] != "TOA5":
+        raise ValueError(f"Expected TOA5 file, got '{env_fields[0]}'")
+
+    return {
+        "station_name": env_fields[1],
+        "logger_model": env_fields[2],
+        "serial_no": env_fields[3],
+        "os_version": env_fields[4],
+        "program_name": env_fields[5],
+        "program_sig": env_fields[6],
+        "table_name": env_fields[7],
+        "field_names": next(csv.reader(io.StringIO(lines[1])))[
+            2:
+        ],  # skip TIMESTAMP, RECORD
+        "field_units": next(csv.reader(io.StringIO(lines[2])))[2:],
+        "field_proc": next(csv.reader(io.StringIO(lines[3])))[2:],
+    }
+
+
+def toa5_to_pandas(file_path):
+    """Load a TOA5 file into a pandas DataFrame."""
+    import pandas as pd
+
+    header = parse_toa5_header(file_path)
+    df = pd.read_csv(
+        file_path,
+        skiprows=4,
+        names=["TIMESTAMP"] + ["RECORD"] + header["field_names"],
+        parse_dates=True,
+    )
+    df["TIMESTAMP"] = pd.to_datetime(df["TIMESTAMP"], errors="coerce")
+    return df, header
 
 
 def main():
