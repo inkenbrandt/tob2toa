@@ -33,6 +33,7 @@ import sys
 import os
 import glob
 from datetime import datetime, timedelta
+import pandas as pd
 
 # Base epoch for Campbell Scientific timestamps
 CSI_EPOCH = datetime(1990, 1, 1)
@@ -257,6 +258,114 @@ def _get_interval_seconds(interval_str):
     return None
 
 
+def _extract_valid_records(file_data, hdr):
+    """Extract valid TOB3 records from file bytes.
+
+    Returns:
+        list[tuple[int, int, int, list]]:
+            Tuples are (seconds, subseconds, record_number, field_values).
+    """
+    frame_size = hdr["frame_size"]
+    validation_stamp = hdr["validation_stamp"]
+    record_size = hdr["record_size"]
+    records_per_frame = hdr["records_per_frame"]
+    field_types = hdr["field_types"]
+    interval_str = hdr["lines"][1][1]
+
+    # Data frames start immediately after the 6 header lines.
+    data_start = hdr["header_byte_end"]
+    total_frames = (len(file_data) - data_start) // frame_size
+
+    # Compute field sizes and offsets for fast parsing.
+    field_sizes = [_type_size(t) for t in field_types]
+    field_offsets = []
+    offset = 0
+    for size in field_sizes:
+        field_offsets.append(offset)
+        offset += size
+
+    interval_sec = _get_interval_seconds(interval_str)
+
+    records = []
+    for frame_idx in range(total_frames):
+        frame_start = data_start + frame_idx * frame_size
+        frame = file_data[frame_start : frame_start + frame_size]
+
+        # Check validation stamp in footer (last 2 bytes of frame).
+        vstamp = struct.unpack_from("<H", frame, frame_size - 2)[0]
+        if vstamp != validation_stamp:
+            continue
+
+        # Frame header: seconds (4B LE) + subseconds (4B LE) + record number (4B LE).
+        sec = struct.unpack_from("<I", frame, 0)[0]
+        subsec = struct.unpack_from("<I", frame, 4)[0]
+        base_recno = struct.unpack_from("<I", frame, 8)[0]
+
+        for rec_idx in range(records_per_frame):
+            rec_offset = 12 + rec_idx * record_size
+            if rec_offset + record_size > frame_size - 4:
+                break
+
+            rec_data = frame[rec_offset : rec_offset + record_size]
+            recno = base_recno + rec_idx
+
+            # Advance timestamp for multi-record frames when interval is known.
+            if rec_idx == 0:
+                rec_sec = sec
+                rec_subsec = subsec
+            elif interval_sec is not None:
+                total_100_usec = sec * 10_000 + subsec + int(rec_idx * interval_sec * 10_000)
+                rec_sec = total_100_usec // 10_000
+                rec_subsec = total_100_usec % 10_000
+            else:
+                rec_sec = sec
+                rec_subsec = subsec
+
+            values = []
+            for i, dtype in enumerate(field_types):
+                raw = rec_data[field_offsets[i] : field_offsets[i] + field_sizes[i]]
+                values.append(_decode_value(raw, dtype))
+
+            records.append((rec_sec, rec_subsec, recno, values))
+
+    # Sort by record number to ensure chronological order.
+    records.sort(key=lambda r: r[2])
+    return records
+
+
+def tob3_to_dataframe(input_path):
+    """Parse a TOB3 binary file into a pandas DataFrame.
+
+    Args:
+        input_path: Path to the TOB3 .dat file.
+
+    Returns:
+        pandas.DataFrame with columns: TIMESTAMP, RECORD, and all TOB3 fields.
+    """
+    with open(input_path, "rb") as f:
+        file_data = f.read()
+
+    hdr = parse_header(file_data)
+    records = _extract_valid_records(file_data, hdr)
+
+    if not records:
+        return pd.DataFrame(columns=["TIMESTAMP", "RECORD"] + hdr["field_names"])
+
+    time_res = hdr["time_resolution"]
+    field_names = hdr["field_names"]
+    rows = []
+    for rec_sec, rec_subsec, recno, values in records:
+        rows.append(
+            {
+                "TIMESTAMP": _format_timestamp(rec_sec, rec_subsec, time_res),
+                "RECORD": recno,
+                **dict(zip(field_names, values)),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def convert_tob3_to_toa5(input_path, output_path=None, verbose=True):
     """Convert a TOB3 binary file to TOA5 text format.
 
@@ -275,92 +384,20 @@ def convert_tob3_to_toa5(input_path, output_path=None, verbose=True):
     hdr = parse_header(file_data)
 
     frame_size = hdr["frame_size"]
-    validation_stamp = hdr["validation_stamp"]
-    record_size = hdr["record_size"]
-    records_per_frame = hdr["records_per_frame"]
     field_types = hdr["field_types"]
     field_names = hdr["field_names"]
     time_res = hdr["time_resolution"]
-    interval_str = hdr["lines"][1][1]
-
-    # Data frames start immediately after the 6 header lines.
-    # Campbell pads the header text (with spaces inside fields) so that
-    # the 6th line's CRLF lands exactly on a power-of-2 byte boundary.
     data_start = hdr["header_byte_end"]
-
     total_frames = (file_size - data_start) // frame_size
 
     if verbose:
         print(f"  Table: {hdr['table_name']}")
-        print(f"  Frame size: {frame_size}, Record size: {record_size}")
-        print(f"  Records/frame: {records_per_frame}")
+        print(f"  Frame size: {frame_size}, Record size: {hdr['record_size']}")
+        print(f"  Records/frame: {hdr['records_per_frame']}")
         print(f"  Total frames: {total_frames}")
-        print(f"  Validation stamp: {validation_stamp}")
+        print(f"  Validation stamp: {hdr['validation_stamp']}")
 
-    # Compute field sizes and offsets for fast parsing
-    field_sizes = [_type_size(t) for t in field_types]
-    field_offsets = []
-    offset = 0
-    for s in field_sizes:
-        field_offsets.append(offset)
-        offset += s
-
-    # Calculate interval in seconds and subsecond units for multi-record frames
-    interval_sec = _get_interval_seconds(interval_str)
-
-    # First pass: collect all valid records (sorted by timestamp + record number)
-    records = []
-    for frame_idx in range(total_frames):
-        frame_start = data_start + frame_idx * frame_size
-        frame = file_data[frame_start : frame_start + frame_size]
-
-        # Check validation stamp in footer (last 2 bytes of frame)
-        vstamp = struct.unpack_from("<H", frame, frame_size - 2)[0]
-        if vstamp != validation_stamp:
-            continue
-
-        # Frame header: seconds (4B LE) + subseconds (4B LE) + record number (4B LE)
-        sec = struct.unpack_from("<I", frame, 0)[0]
-        subsec = struct.unpack_from("<I", frame, 4)[0]
-        base_recno = struct.unpack_from("<I", frame, 8)[0]
-
-        # Extract records within this frame
-        for rec_idx in range(records_per_frame):
-            rec_offset = 12 + rec_idx * record_size
-            if rec_offset + record_size > frame_size - 4:
-                break
-
-            rec_data = frame[rec_offset : rec_offset + record_size]
-            recno = base_recno + rec_idx
-
-            # Calculate timestamp for this record within the frame
-            if rec_idx == 0:
-                rec_sec = sec
-                rec_subsec = subsec
-            else:
-                # Advance by interval for subsequent records in multi-record frames
-                if interval_sec is not None:
-                    total_usec = (
-                        sec * 10_000
-                        + subsec
-                        + int(rec_idx * interval_sec * 10_000)
-                    )
-                    rec_sec = total_usec // 10_000
-                    rec_subsec = total_usec % 10_000
-                else:
-                    rec_sec = sec
-                    rec_subsec = subsec
-
-            # Decode all field values
-            values = []
-            for i, dtype in enumerate(field_types):
-                raw = rec_data[field_offsets[i] : field_offsets[i] + field_sizes[i]]
-                values.append(_decode_value(raw, dtype))
-
-            records.append((rec_sec, rec_subsec, recno, values))
-
-    # Sort by record number to ensure chronological order
-    records.sort(key=lambda r: r[2])
+    records = _extract_valid_records(file_data, hdr)
 
     if verbose:
         print(f"  Valid records: {len(records)}")
