@@ -11,6 +11,7 @@ from tob2toa.tob2toa import (
     parse_header,
     convert_tob3_to_toa5,
     tob3_to_dataframe,
+    combine_tob3_files,
 )
 
 def test_type_size():
@@ -189,3 +190,137 @@ def test_tob3_to_dataframe(tmp_path):
     assert df.iloc[0]["Temp"] == pytest.approx(20.0)
     assert df.iloc[-1]["TIMESTAMP"] == "2023-01-01 00:00:05"
     assert df.iloc[-1]["Press"] == pytest.approx(1018.0)
+
+
+def _make_tob3_file(path, base_sec, start_recno, n_records, vstamp=12345):
+    """Helper: write a minimal TOB3 file with n_records into path."""
+    header_text = (
+        '"TOB3","Station1","CR1000X","12345","OS_1.0","Prog1","1234","2023-01-01 00:00:00"\r\n'
+        '"MainTable","1 SEC",64,10000,' + str(vstamp) + ',"Sec100Usec","","",""\r\n'
+        '"Temp","Press"\r\n'
+        '"degC","hPa"\r\n'
+        '"Smp","Smp"\r\n'
+        '"IEEE4","IEEE4"\r\n'
+    ).encode("ascii")
+
+    # Frame size 64 = 12 header + 48 data (6 records × 8 bytes) + 4 footer
+    records_per_frame = 6
+    data = b""
+    for i in range(n_records):
+        data += struct.pack(">ff", float(start_recno + i), float(1000 + start_recno + i))
+
+    # Pad to full frames
+    total_records_space = ((n_records + records_per_frame - 1) // records_per_frame) * records_per_frame
+    for _ in range(total_records_space - n_records):
+        data += struct.pack(">ff", 0.0, 0.0)
+
+    frames = b""
+    for frame_idx in range(total_records_space // records_per_frame):
+        sec = base_sec + frame_idx * records_per_frame
+        recno = start_recno + frame_idx * records_per_frame
+        frame_hdr = struct.pack("<III", sec, 0, recno)
+        frame_data = data[frame_idx * records_per_frame * 8 : (frame_idx + 1) * records_per_frame * 8]
+        footer = struct.pack("<HH", 0, vstamp)
+        frames += frame_hdr + frame_data + footer
+
+    path.write_bytes(header_text + frames)
+
+
+def test_combine_tob3_files_parquet(tmp_path):
+    from datetime import datetime
+    base_sec = int((datetime(2023, 1, 1) - datetime(1990, 1, 1)).total_seconds())
+
+    _make_tob3_file(tmp_path / "file1.dat", base_sec, start_recno=1, n_records=6)
+    _make_tob3_file(tmp_path / "file2.dat", base_sec + 6, start_recno=7, n_records=6)
+
+    out = tmp_path / "combined.parquet"
+    result = combine_tob3_files(str(tmp_path), str(out), verbose=False)
+
+    assert result == str(out)
+    assert out.exists()
+
+    import pandas as pd
+    df = pd.read_parquet(str(out))
+    assert len(df) == 12
+    assert list(df.columns) == ["TIMESTAMP", "RECORD", "Temp", "Press"]
+
+
+def test_combine_tob3_files_sqlite(tmp_path):
+    from datetime import datetime
+    base_sec = int((datetime(2023, 1, 1) - datetime(1990, 1, 1)).total_seconds())
+
+    _make_tob3_file(tmp_path / "file1.dat", base_sec, start_recno=1, n_records=6)
+    _make_tob3_file(tmp_path / "file2.dat", base_sec + 6, start_recno=7, n_records=6)
+
+    out = tmp_path / "combined.sqlite"
+    result = combine_tob3_files(str(tmp_path), str(out), verbose=False)
+
+    assert result == str(out)
+    assert out.exists()
+
+    import sqlite3
+    conn = sqlite3.connect(str(out))
+    rows = conn.execute("SELECT COUNT(*) FROM MainTable").fetchone()[0]
+    conn.close()
+    assert rows == 12
+
+
+def test_combine_tob3_files_deduplication(tmp_path):
+    from datetime import datetime
+    base_sec = int((datetime(2023, 1, 1) - datetime(1990, 1, 1)).total_seconds())
+
+    # Both files have the same record numbers → 6 unique after dedup
+    _make_tob3_file(tmp_path / "file1.dat", base_sec, start_recno=1, n_records=6)
+    _make_tob3_file(tmp_path / "file2.dat", base_sec, start_recno=1, n_records=6)
+
+    out = tmp_path / "deduped.parquet"
+    combine_tob3_files(str(tmp_path), str(out), deduplicate=True, verbose=False)
+
+    import pandas as pd
+    df = pd.read_parquet(str(out))
+    assert len(df) == 6
+
+
+def test_combine_tob3_files_explicit_format(tmp_path):
+    from datetime import datetime
+    base_sec = int((datetime(2023, 1, 1) - datetime(1990, 1, 1)).total_seconds())
+    _make_tob3_file(tmp_path / "file1.dat", base_sec, start_recno=1, n_records=6)
+
+    # Use explicit format with non-standard extension
+    out = tmp_path / "output.bin"
+    combine_tob3_files(str(tmp_path), str(out), output_format="parquet", verbose=False)
+
+    import pandas as pd
+    df = pd.read_parquet(str(out))
+    assert len(df) == 6
+
+
+def test_combine_tob3_files_no_files_raises(tmp_path):
+    with pytest.raises(ValueError, match="No TOB3 files found"):
+        combine_tob3_files(str(tmp_path), str(tmp_path / "out.parquet"), verbose=False)
+
+
+def test_combine_tob3_files_unknown_format_raises(tmp_path):
+    from datetime import datetime
+    base_sec = int((datetime(2023, 1, 1) - datetime(1990, 1, 1)).total_seconds())
+    _make_tob3_file(tmp_path / "file1.dat", base_sec, start_recno=1, n_records=6)
+
+    with pytest.raises(ValueError, match="Cannot infer output format"):
+        combine_tob3_files(str(tmp_path), str(tmp_path / "out.xyz"), verbose=False)
+
+
+def test_combine_tob3_files_list_input(tmp_path):
+    from datetime import datetime
+    base_sec = int((datetime(2023, 1, 1) - datetime(1990, 1, 1)).total_seconds())
+
+    f1 = tmp_path / "file1.dat"
+    f2 = tmp_path / "file2.dat"
+    _make_tob3_file(f1, base_sec, start_recno=1, n_records=6)
+    _make_tob3_file(f2, base_sec + 6, start_recno=7, n_records=6)
+
+    out = tmp_path / "combined.parquet"
+    combine_tob3_files([str(f1), str(f2)], str(out), verbose=False)
+
+    import pandas as pd
+    df = pd.read_parquet(str(out))
+    assert len(df) == 12
