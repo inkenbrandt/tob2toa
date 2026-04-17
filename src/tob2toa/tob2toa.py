@@ -534,6 +534,137 @@ def toa5_to_pandas(file_path):
     return df, header
 
 
+def combine_tob3_files(input_path, output_path, output_format=None, table_name=None, deduplicate=True, verbose=True):
+    """Combine multiple TOB3 files from a directory into a single SQLite, DuckDB, or Parquet file.
+
+    Args:
+        input_path: Directory containing TOB3 .dat files, or a list of file paths.
+        output_path: Destination file path. Extension is used to infer format when
+            output_format is None: .sqlite/.sqlite3/.db → sqlite, .duckdb → duckdb,
+            .parquet/.pq → parquet.
+        output_format: Explicit format override: "sqlite", "duckdb", or "parquet".
+        table_name: Table name for sqlite/duckdb outputs. Defaults to the TOB3 table name
+            from the first file; falls back to "data" if files have mixed table names.
+        deduplicate: Remove rows with duplicate RECORD numbers (keeps last seen). Default True.
+        verbose: Print progress info. Default True.
+
+    Returns:
+        Path to the output file (str).
+
+    Raises:
+        ValueError: If no TOB3 files are found, the format cannot be determined, or files
+            have incompatible schemas.
+        ImportError: If duckdb is not installed when output_format="duckdb".
+    """
+    # Collect files
+    if isinstance(input_path, (list, tuple)):
+        files = list(input_path)
+    else:
+        files = find_tob3_files(input_path)
+
+    if not files:
+        raise ValueError(f"No TOB3 files found in {input_path!r}")
+
+    # Determine output format
+    if output_format is None:
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext in (".sqlite", ".sqlite3", ".db"):
+            output_format = "sqlite"
+        elif ext == ".duckdb":
+            output_format = "duckdb"
+        elif ext in (".parquet", ".pq"):
+            output_format = "parquet"
+        else:
+            raise ValueError(
+                f"Cannot infer output format from extension {ext!r}. "
+                "Set output_format to 'sqlite', 'duckdb', or 'parquet'."
+            )
+
+    output_format = output_format.lower()
+    if output_format not in ("sqlite", "duckdb", "parquet"):
+        raise ValueError(f"Unknown output_format {output_format!r}; use 'sqlite', 'duckdb', or 'parquet'")
+
+    if output_format == "duckdb":
+        try:
+            import duckdb
+        except ImportError as exc:
+            raise ImportError(
+                "duckdb is required for DuckDB output. Install it with: pip install duckdb"
+            ) from exc
+
+    # Read and combine all files
+    frames = []
+    detected_table = None
+    reference_columns = None
+
+    for i, fpath in enumerate(files):
+        if verbose:
+            print(f"  Reading [{i+1}/{len(files)}]: {os.path.basename(fpath)}")
+        try:
+            df = tob3_to_dataframe(fpath)
+        except Exception as exc:
+            if verbose:
+                print(f"    WARNING: skipping {fpath!r} — {exc}")
+            continue
+
+        if reference_columns is None:
+            reference_columns = list(df.columns)
+            # Detect table name from header
+            with open(fpath, "rb") as fh:
+                hdr = parse_header(fh.read())
+            detected_table = hdr["table_name"]
+        elif list(df.columns) != reference_columns:
+            raise ValueError(
+                f"Schema mismatch: {fpath!r} has columns {list(df.columns)} "
+                f"but expected {reference_columns}"
+            )
+
+        frames.append(df)
+
+    if not frames:
+        raise ValueError("No valid records could be read from any TOB3 file.")
+
+    combined = pd.concat(frames, ignore_index=True)
+
+    if deduplicate:
+        combined = combined.drop_duplicates(subset=["RECORD"], keep="last")
+
+    combined = combined.sort_values("TIMESTAMP").reset_index(drop=True)
+
+    if verbose:
+        print(f"  Total records after combining: {len(combined)}")
+
+    # Resolve table name
+    tbl = table_name or detected_table or "data"
+
+    # Write output
+    output_path = str(output_path)
+
+    if output_format == "sqlite":
+        import sqlite3
+        conn = sqlite3.connect(output_path)
+        try:
+            combined.to_sql(tbl, conn, if_exists="replace", index=False)
+            conn.commit()
+        finally:
+            conn.close()
+
+    elif output_format == "duckdb":
+        conn = duckdb.connect(output_path)
+        try:
+            conn.execute(f'CREATE OR REPLACE TABLE "{tbl}" AS SELECT * FROM combined')
+        finally:
+            conn.close()
+
+    elif output_format == "parquet":
+        combined.to_parquet(output_path, index=False)
+
+    if verbose:
+        print(f"  Output ({output_format}): {output_path}")
+
+    return output_path
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python tob3_to_toa5.py <input.dat> [output.dat]")
