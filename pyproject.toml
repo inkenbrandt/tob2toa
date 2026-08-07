@@ -36,6 +36,9 @@ duckdb = [
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
+    "black>=24.3",
+    "jupyter>=1.0",
+    "ipykernel>=6.27",
 ]
 docs = [
     "mkdocs>=1.5",

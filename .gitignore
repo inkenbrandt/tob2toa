@@ -2,3 +2,4 @@
 /example/toa_example_long.csv
 __pycache__/
 *.egg-info/
+.venv
