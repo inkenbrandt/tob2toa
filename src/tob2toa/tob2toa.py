@@ -53,7 +53,7 @@ def parse_header(raw_bytes):
     lines = []
     for _ in range(6):
         end = raw_bytes.index(b"\r\n", pos)
-        line_text = raw_bytes[pos:end].decode("ascii")
+        line_text = raw_bytes[pos:end].decode("utf-8", errors="replace")
         fields = next(csv.reader(io.StringIO(line_text)))
         lines.append(fields)
         pos = end + 2
